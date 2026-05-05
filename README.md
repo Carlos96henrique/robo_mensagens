@@ -1,4 +1,4 @@
-#Esse projeto tem por objetivo automatizar o envio de posts para um grupo no instagram.
+#Esse projeto tem por objetivo automatizar o envio de posts para um grupo no whatsapp.
 
 
 Tecnologias usadas:
