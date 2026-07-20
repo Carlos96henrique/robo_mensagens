@@ -1,64 +1,101 @@
 const gerenciador = require('./gerenciador-mensagens');
+const logger = require('./gerenciador-log');
 
-const mensagens = [
-    '10 - Última mensagem do teste!',
-    '9 - Preparando para finalizar o teste!',
-    '8 - Ignorem, ainda é um robô!',
-    '7 - Essa mensagem é uma pergunta?',
-    '6 - Na hora de testar o código eu havia me esquecido dessa mensagem e deu undefined! kkkkk',
-    '5 - O whassapp ironicamente não gosta de robôs!',
-    '4 - Preenchendo texto!',
-    '3 - O teste foi um sucesso!',
-    '2- Teste de log',
-    '1 - Primeira mensagem!'
-];
+const TAMANHO_MINIMO_FILA = 10;
+const INTERVALO_VERIFICACAO_MS = 5000;
 
 function getRandomIntInclusive(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-function armazenarNumeros() {
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function formatarTextoMultilinha(texto) {
+    if (typeof texto !== 'string') {
+        return texto;
+    }
+
+    const textoFormatado = texto
+        .split(/\r?\n+/)
+        .map(parte => parte.trim())
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+,/g, ',')
+        .replace(/,\s+/g, ',')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+
+    return textoFormatado.replace(/(\d)\s+((?:\d+%)(?:\s*[A-Za-z]+)?)/g, '$1 - $2');
+}
+
+function armazenarNumeros(quantidade) {
     const numeros = [];
-    for (let i = 0; i < 10; i += 1) {
+    for (let i = 0; i < quantidade; i += 1) {
         numeros.push(getRandomIntInclusive(1, 10));
     }
-    console.log('Números sorteados:', numeros);
+    logger.info(`Números sorteados: ${numeros.join(', ')}`);
     return numeros;
 }
 
-async function removerMensagens() {
+async function removerMensagens(mensagens) {
     if(mensagens.length > 0) {
-        return mensagens.pop();
+        const msg = mensagens.pop();
+        logger.info(`Mensagem removida: ${JSON.stringify(msg)}`);
+        return await estruturarMensagem(msg);
     }
     return;
 }
 
-async function executar() {
-    const numeros = armazenarNumeros();
+async function aguardarFilaMinima(mensagens) {
+    if (mensagens.length !== 0) {
+        return;
+    }
+
+    logger.info(`Fila com 0 item(ns). Aguardando até atingir ${TAMANHO_MINIMO_FILA} ou mais...`);
+    while (mensagens.length < TAMANHO_MINIMO_FILA) {
+        await delay(INTERVALO_VERIFICACAO_MS);
+        logger.info(`Fila atual: ${mensagens.length}. Ainda aguardando mínimo de ${TAMANHO_MINIMO_FILA}.`);
+    }
+    logger.info(`Fila atingiu ${mensagens.length} item(ns). Iniciando disparos.`);
+}
+
+async function executar(mensagens) {
+    if (!Array.isArray(mensagens)) {
+        throw new Error('A lista de mensagens é inválida.');
+    }
+
+    await aguardarFilaMinima(mensagens);
+
+    const filaMensagens = mensagens;
+    const numeros = armazenarNumeros(filaMensagens.length);
     const client = await gerenciador.inicializaGerenciador();
 
     try {
         const chats = await client.getChats();
-        const grupoUm = chats.find(chat => chat.isGroup && chat.name.includes('Teste'));
-        const grupoDois = chats.find(chat => chat.isGroup && chat.name.includes('Penumbra'));
+        const grupo = chats.find(chat => chat.isGroup && chat.name.includes('Teste'));
 
-        console.log('Grupos encontrados:', grupoUm.name, grupoDois.name);
-
-        if (!grupoUm || !grupoDois) {
-            throw new Error('Não foi possível encontrar os grupos de destino. Verifique os nomes.');
+        if (!grupo) {
+            throw new Error('Não foi possível encontrar o grupo de destino. Verifique o nome.');
         }
+
+        logger.info(`Grupo encontrado: ${grupo.name}`);
 
         const sendPromises = numeros.map((minutos) => {
             return new Promise((resolve, reject) => {
                 setTimeout(async () => {
                     try {
-                        const mensagem = await removerMensagens();
+                        const mensagem = await removerMensagens(filaMensagens);
+                        logger.info(`Mensagem estruturada: ${mensagem}`);
                         if (!mensagem) {
                             throw new Error(`Mensagem não encontrada`);
                         }
-                        await grupoUm.sendMessage(mensagem);
-                        await grupoDois.sendMessage(mensagem);
-                        console.log(`Mensagem enviada após ${minutos} minutos: ${mensagem}`);
+                        await grupo.sendMessage(mensagem, {
+                            linkPreview: true,
+                            waitUntilMsgSent: true
+                        });
+                        logger.info(`Mensagem enviada após ${minutos} minutos: ${mensagem}`);
                         resolve();
                     } catch (error) {
                         reject(error);
@@ -68,13 +105,22 @@ async function executar() {
         });
 
         await Promise.all(sendPromises);
-        console.log('Todos os disparos foram concluídos.');
+        logger.info('Todos os disparos foram concluídos.');
+        logger.info(`Fila após disparo: ${filaMensagens.length} item(ns).`);
     } catch (error) {
-        console.error('Erro ao executar o disparador:', error);
+        logger.error(`Erro ao executar o disparador: ${error.message}, stack: ${error.stack}`);
         throw error;
     } finally {
         await client.destroy();
     }
+}
+
+async function estruturarMensagem(anuncio) {
+    const titulo = formatarTextoMultilinha(anuncio.titulo);
+    const preco = formatarTextoMultilinha(anuncio.preco);
+    const link = formatarTextoMultilinha(anuncio.link);
+
+    return `Confira este produto incrível: ${titulo}\n\nPreço: ${preco}!\n\nLink: ${link}`;
 }
 
 module.exports = {

@@ -1,17 +1,25 @@
 const express = require('express');
 const disparador = require('./disparador');
+const coletor = require('./coletor');
 
 const app = express();
 
 app.use(express.json());
 
-disparador.executar().then(() => {
-      console.log('Disparador finalizado com sucesso.');
-      process.exit(0);
-  }).catch(error => {
-      console.error('Erro no disparador:', error);
-      process.exit(1);
-  });
+const listaMensagens = [];
+
+async function iniciarCicloContinuo() {
+    while (true) {
+        try {
+            await coletor.automatizarPagina(listaMensagens);
+            await disparador.executar(listaMensagens);
+        } catch (error) {
+            console.error('Erro no ciclo do coletor/disparador:', error);
+        }
+    }
+}
+
+iniciarCicloContinuo();
 
 console.log('Aplicação iniciada com sucesso!');
 
