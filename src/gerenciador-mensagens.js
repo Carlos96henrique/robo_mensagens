@@ -36,7 +36,41 @@ async function inicializaGerenciador() {
     });
 }
 
-module.exports = {
-    inicializaGerenciador
-};
+async function buscarGrupoPorNome(client, trechoNome) {
+    if (!client?.pupPage) {
+        throw new Error('Cliente de mensagens não inicializado.');
+    }
 
+    if (typeof trechoNome !== 'string' || !trechoNome.trim()) {
+        throw new Error('Critério de busca do destino inválido.');
+    }
+
+    return client.pupPage.evaluate((trecho) => {
+        const chats = window.require('WAWebCollections').Chat.getModelsArray();
+        const grupo = chats.find(chat => {
+            const idSerializado = chat.id?._serialized
+                ?? chat.id?.$1
+                ?? chat.id?.toString?.();
+            const nome = chat.name ?? chat.formattedTitle ?? '';
+            const ehGrupo = Boolean(chat.groupMetadata)
+                || chat.id?.server === 'g.us'
+                || idSerializado?.endsWith('@g.us');
+
+            return ehGrupo && nome.includes(trecho);
+        });
+
+        if (!grupo) {
+            return null;
+        }
+
+        return grupo.id?._serialized
+            ?? grupo.id?.$1
+            ?? grupo.id?.toString?.()
+            ?? null;
+    }, trechoNome.trim());
+}
+
+module.exports = {
+    inicializaGerenciador,
+    buscarGrupoPorNome
+};
