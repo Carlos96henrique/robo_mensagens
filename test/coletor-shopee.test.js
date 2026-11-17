@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 
 const coletor = require('../src/coletor-shopee');
 const disparador = require('../src/disparador');
+const logger = require('../src/gerenciador-log');
 const CATEGORIA = { id: 100010, nome: 'Home Appliances' };
 
 function criarEstadoComCategorias(categorias = [CATEGORIA]) {
@@ -425,4 +426,153 @@ test('propaga erros GraphQL que impedem a coleta', async () => {
         coletor.buscarPagina(1, 1, CATEGORIA.id, fetchFalso),
         /10020: Consulta recusada/
     );
+});
+
+function produtoDaPagina(pagina, categoriaId = CATEGORIA.id) {
+    return {
+        itemId: `${categoriaId}-${pagina}`,
+        productName: `Produto ${categoriaId}-${pagina}`,
+        offerLink: `https://example.invalid/produto/${categoriaId}/${pagina}`,
+        imageUrl: `https://example.invalid/imagem/${categoriaId}/${pagina}.jpg`,
+        priceMin: '10.00', priceMax: '10.00'
+    };
+}
+
+function simularConsulta(responder) {
+    return (pagina, limite, categoriaId) => coletor.buscarPagina(pagina, limite, categoriaId, async (url, options) => {
+        const resposta = responder(JSON.parse(options.body).variables);
+        return {
+            ok: true,
+            async json() {
+                if (resposta.erros) {
+                    return { errors: resposta.erros.map(code => ({
+                        message: 'Consulta recusada', extensions: { code }
+                    })) };
+                }
+                return { data: { productOfferV2: {
+                    nodes: resposta.produtos ?? [produtoDaPagina(pagina, categoriaId)],
+                    pageInfo: { hasNextPage: resposta.temProximaPagina ?? true }
+                } } };
+            }
+        };
+    });
+}
+
+test('erro 10000 avança a página, completa a coleta e registra contexto da falha', async t => {
+    const paginas = [];
+    const estado = criarEstadoComCategorias();
+    const log = t.mock.method(logger, 'error', () => {});
+    const fila = [];
+    await coletor.automatizarPagina(fila, {
+        limite: 1, estadoPaginacao: estado,
+        buscarPaginaImpl: simularConsulta(({ page }) => {
+            paginas.push(page);
+            return page === 1 ? { erros: ['10000'] } : {};
+        })
+    });
+    assert.deepEqual(paginas, [1, 2]);
+    assert.equal(fila[0].idExterno, `${CATEGORIA.id}-2`);
+    assert.equal(estado.paginasPorCategoria[CATEGORIA.id], 3);
+    assert.equal(log.mock.callCount(), 1);
+    assert.match(log.mock.calls[0].arguments[0], /erro 10000.*Home Appliances.*100010.*página 1; próxima página: 2.*stack:/);
+});
+
+test('preserva produtos anteriores e deduplicação ao pular uma página com erro', async () => {
+    const anterior = coletor.normalizarProduto(produtoDaPagina(1), CATEGORIA.nome);
+    const outro = { origem: 'mercado-livre', titulo: 'Produto pendente' };
+    const fila = [anterior, outro];
+    const estado = criarEstadoComCategorias();
+    estado.paginasPorCategoria[CATEGORIA.id] = 2;
+    await coletor.automatizarPagina(fila, {
+        limite: 3, estadoPaginacao: estado,
+        buscarPaginaImpl: simularConsulta(({ page }) => {
+            if (page === 3) return { erros: [10000] };
+            return { produtos: [produtoDaPagina(1), produtoDaPagina(page)] };
+        })
+    });
+    assert.equal(fila.length, 4);
+    assert.equal(fila[0], anterior);
+    assert.equal(fila[1], outro);
+    assert.deepEqual(fila.filter(p => p.origem === 'shopee').map(p => p.idExterno), [
+        `${CATEGORIA.id}-1`, `${CATEGORIA.id}-2`, `${CATEGORIA.id}-4`
+    ]);
+});
+
+test('três páginas com erro em um lote novo levam à categoria seguinte', async () => {
+    const segunda = { id: 100013, nome: 'Celulares' };
+    const estado = criarEstadoComCategorias([CATEGORIA, segunda]);
+    const consultas = [];
+    const fila = [];
+    await coletor.automatizarPagina(fila, {
+        limite: 1, estadoPaginacao: estado,
+        buscarPaginaImpl: simularConsulta(({ page, productCatId }) => {
+            consultas.push([productCatId, page]);
+            return productCatId === CATEGORIA.id ? { erros: [10000] } : {};
+        })
+    });
+    assert.deepEqual(consultas, [[100010, 1], [100010, 2], [100010, 3], [100013, 1]]);
+    assert.equal(fila[0].categoria, segunda.nome);
+    assert.equal(estado.paginasPorCategoria[CATEGORIA.id], 4);
+});
+
+test('encerra após uma volta se todas as categorias falham, sem perder itens de outra loja', async () => {
+    const estado = criarEstadoComCategorias([CATEGORIA, { id: 100013, nome: 'Celulares' }]);
+    const pendente = { origem: 'mercado-livre' };
+    const fila = [pendente];
+    let consultas = 0;
+    await assert.rejects(coletor.automatizarPagina(fila, {
+        limite: 1, estadoPaginacao: estado,
+        buscarPaginaImpl: simularConsulta(() => { consultas += 1; return { erros: [10000] }; })
+    }), /Nenhuma das 2 categorias/);
+    assert.equal(consultas, 6);
+    assert.deepEqual(fila, [pendente]);
+    assert.equal(estado.paginasPorCategoria[100010], 4);
+    assert.equal(estado.paginasPorCategoria[100013], 4);
+});
+
+test('após três falhas preserva lote residual e retoma da página avançada na nova tentativa', async () => {
+    const estado = criarEstadoComCategorias();
+    const pendente = coletor.normalizarProduto(produtoDaPagina(10), CATEGORIA.nome);
+    const fila = [pendente];
+    await assert.rejects(coletor.automatizarPagina(fila, {
+        limite: 2, estadoPaginacao: estado,
+        buscarPaginaImpl: simularConsulta(() => ({ erros: [10000] }))
+    }), /apenas 1\/2/);
+    assert.deepEqual(fila, [pendente]);
+    assert.equal(estado.paginasPorCategoria[CATEGORIA.id], 4);
+    const paginas = [];
+    await coletor.automatizarPagina(fila, {
+        limite: 2, estadoPaginacao: estado,
+        buscarPaginaImpl: simularConsulta(({ page }) => { paginas.push(page); return {}; })
+    });
+    assert.deepEqual(paginas, [4]);
+    assert.equal(fila.length, 2);
+    assert.equal(fila[0], pendente);
+});
+
+test('uma página bem-sucedida reinicia a contagem de erros consecutivos', async () => {
+    const paginas = [];
+    const fila = [];
+    await coletor.automatizarPagina(fila, {
+        limite: 2, estadoPaginacao: criarEstadoComCategorias(),
+        buscarPaginaImpl: simularConsulta(({ page }) => {
+            paginas.push(page);
+            return page % 3 === 0 ? {} : { erros: [10000] };
+        })
+    });
+    assert.deepEqual(paginas, [1, 2, 3, 4, 5, 6]);
+    assert.equal(fila.length, 2);
+});
+
+test('erros de autenticação, limite, parâmetros ou mistos não são tratados como página a pular', async () => {
+    for (const erros of [[10020], [10030], [11001], [10000, 10020], [undefined]]) {
+        const estado = criarEstadoComCategorias();
+        let consultas = 0;
+        await assert.rejects(coletor.automatizarPagina([], {
+            limite: 1, estadoPaginacao: estado,
+            buscarPaginaImpl: simularConsulta(() => { consultas += 1; return { erros }; })
+        }), /API da Shopee recusou/);
+        assert.equal(consultas, 1);
+        assert.equal(estado.paginasPorCategoria[CATEGORIA.id], undefined);
+    }
 });

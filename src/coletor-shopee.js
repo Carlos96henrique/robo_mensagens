@@ -17,6 +17,7 @@ const LIMITE_PADRAO = 10;
 const TAMANHO_PAGINA = 10;
 const TAMANHO_PAGINA_CATEGORIAS = 50;
 const TIMEOUT_REQUISICAO_MS = 30000;
+const MAX_PAGINAS_COM_ERRO_CONSECUTIVAS = 3;
 const estadoPaginacaoPadrao = criarEstadoPaginacao();
 const NOMES_CATEGORIAS_PT_BR = {
     100001: 'Saúde',
@@ -153,7 +154,9 @@ async function executarConsultaGraphQL(operationName, query, variables, fetchImp
 
         const resultado = await response.json();
         if (Array.isArray(resultado.errors) && resultado.errors.length > 0) {
-            throw new Error(`API da Shopee recusou a consulta: ${descreverErrosApi(resultado.errors)}.`);
+            const erro = new Error(`API da Shopee recusou a consulta: ${descreverErrosApi(resultado.errors)}.`);
+            erro.codigosApi = resultado.errors.map(item => Number(item.extensions?.code));
+            throw erro;
         }
 
         return resultado.data;
@@ -391,14 +394,41 @@ async function automatizarPagina(listaProdutos, {
         );
         let pagina = estadoPaginacao.paginasPorCategoria[categoria.id] || 1;
         let continuar = true;
+        let paginasComErroConsecutivas = 0;
         const itensAdicionados = [];
 
         while (quantidadeShopee < limite && continuar) {
-            const { produtos, temProximaPagina } = await buscarPaginaImpl(
-                pagina,
-                TAMANHO_PAGINA,
-                categoria.id
-            );
+            let resultadoPagina;
+            try {
+                resultadoPagina = await buscarPaginaImpl(pagina, TAMANHO_PAGINA, categoria.id);
+            } catch (error) {
+                const erroSistema = Array.isArray(error.codigosApi)
+                    && error.codigosApi.length > 0
+                    && error.codigosApi.every(codigo => codigo === 10000);
+                if (!erroSistema) throw error;
+
+                paginasComErroConsecutivas += 1;
+                const paginaComErro = pagina;
+                pagina += 1;
+                estadoPaginacao.paginasPorCategoria[categoria.id] = pagina;
+                logger.error(
+                    `Shopee: erro 10000 na categoria "${categoria.nome}" (ID ${categoria.id}), `
+                    + `página ${paginaComErro}; próxima página: ${pagina}. `
+                    + `Falhas consecutivas: ${paginasComErroConsecutivas}/${MAX_PAGINAS_COM_ERRO_CONSECUTIVAS}. `
+                    + `Causa: ${error.message}, stack: ${error.stack}`
+                );
+
+                if (paginasComErroConsecutivas >= MAX_PAGINAS_COM_ERRO_CONSECUTIVAS) {
+                    logger.warn(
+                        `Shopee: limite de ${MAX_PAGINAS_COM_ERRO_CONSECUTIVAS} páginas com erro consecutivas `
+                        + `atingido na categoria "${categoria.nome}". Encerrando a tentativa desta categoria.`
+                    );
+                    break;
+                }
+                continue;
+            }
+            paginasComErroConsecutivas = 0;
+            const { produtos, temProximaPagina } = resultadoPagina;
 
             logger.info(`Shopee: página ${pagina} retornou ${produtos.length} produto(s).`);
 

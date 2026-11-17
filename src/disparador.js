@@ -168,7 +168,7 @@ function validarFilaPronta(mensagens) {
     validarLote(mensagens);
 }
 
-async function executar(mensagens) {
+async function executar(mensagens, canal) {
     if (!Array.isArray(mensagens)) {
         throw new Error('A lista de mensagens é inválida.');
     }
@@ -177,14 +177,10 @@ async function executar(mensagens) {
 
     const filaMensagens = mensagens;
     const numeros = armazenarNumeros(filaMensagens.length);
-    const client = await gerenciador.inicializaGerenciador();
+    const client = canal?.client ?? await gerenciador.inicializaGerenciador();
 
     try {
-        const grupoId = await gerenciador.buscarGrupoPorNome(client, 'Teste');
-
-        if (!grupoId) {
-            throw new Error('Não foi possível encontrar o grupo de destino. Verifique o nome.');
-        }
+        const { grupoId } = canal ?? await gerenciador.verificarDisponibilidade(client);
 
         logger.info('Destino de mensagens encontrado.');
 
@@ -210,6 +206,7 @@ async function executar(mensagens) {
                         logger.info(`Mensagem enviada após ${minutos} minuto(s).`);
                         resolve();
                     } catch (error) {
+                        logger.error(`Erro ao enviar mensagem pelo WhatsApp: ${error.message}, stack: ${error.stack}`);
                         reject(error);
                     }
                 }, (minutos * 60 * 1000));
@@ -229,7 +226,7 @@ async function executar(mensagens) {
         logger.error(`Erro ao executar o disparador: ${error.message}, stack: ${error.stack}`);
         throw error;
     } finally {
-        await client.destroy();
+        if (!canal) await gerenciador.encerrarGerenciador(client);
     }
 }
 

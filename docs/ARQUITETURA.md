@@ -4,7 +4,7 @@
 
 Este projeto automatiza a coleta de ofertas em plataformas de comércio eletrônico, transforma os dados dos produtos em mensagens promocionais e envia essas mensagens pelo WhatsApp.
 
-No estado atual, os fluxos da Shopee e do Mercado Livre estão conectados à execução principal. Cada ciclo escolhe uma categoria em cada plataforma, coleta primeiro 10 produtos da categoria da Shopee e depois 10 produtos da categoria do Mercado Livre. O lote completo de 20 itens é embaralhado e somente então entregue ao disparador.
+No estado atual, os fluxos da Shopee e do Mercado Livre estão conectados à execução principal. Antes de cada ciclo, o robô conecta o WhatsApp, verifica o destino e confirma um envio de teste para a própria conta. Somente após essa confirmação, escolhe uma categoria em cada plataforma, coleta primeiro 10 produtos da categoria da Shopee e depois 10 produtos da categoria do Mercado Livre. O lote completo de 20 itens é embaralhado e somente então entregue ao disparador, usando a mesma sessão já verificada.
 
 Quando todos os produtos são enviados, a fila fica vazia e as duas coletas recomeçam na mesma sequência. Em caso de falha, os itens não enviados permanecem na fila e cada coletor completa somente a cota de sua própria origem no ciclo seguinte.
 
@@ -40,7 +40,8 @@ A aplicação é um monólito Node.js executado como um único processo. Coleta,
 flowchart LR
     A[index.js] --> B[server.js]
     B --> C[src/app.js]
-    C --> D[Coletor Shopee\n10 itens]
+    C --> L[Ciclo: verifica conexão, destino\ne envio do WhatsApp]
+    L --> D[Coletor Shopee\n10 itens]
     D --> J[Coletor Mercado Livre\n10 itens]
     J --> E[Fila em memória\n20 itens]
     E --> K[Embaralhador]
@@ -59,6 +60,7 @@ flowchart LR
 - `index.js`: ponto de entrada definido pelo comando `npm start`; carrega o servidor.
 - `server.js`: importa a aplicação Express e abre a porta `3000`.
 - `src/app.js`: cria a aplicação Express, habilita leitura de JSON, mantém a fila compartilhada e inicia o ciclo contínuo de coleta e disparo.
+- `src/ciclo.js`: conecta e verifica o WhatsApp antes das coletas, executa os coletores, valida e embaralha o lote e aciona o disparador com a mesma sessão. Encerra o cliente ao fim de cada tentativa e registra erros antes de aguardar 60 segundos para tentar novamente.
 
 Importante: o processamento começa como efeito colateral da importação de `src/app.js`. O servidor HTTP e o robô não possuem ciclos de vida independentes.
 
@@ -96,12 +98,14 @@ Esse coletor depende fortemente de textos, seletores CSS e comportamento da inte
 - Prefere `offerLink`, que contém o rastreamento de afiliado, e usa o link comum apenas como fallback.
 - Converte cada item para o contrato `{ titulo, preco, link, imagemUrl, categoria, origem, idExterno }` usado pelo disparador.
 - Ignora produtos duplicados ou incompletos com logs de aviso.
-- Registra no nível `error` somente falhas que interrompem a coleta, como autenticação recusada, timeout, erro HTTP ou resposta inválida.
+- Quando uma consulta de produtos retorna somente o erro GraphQL `10000` (`System Error`), registra a causa, stack, categoria, ID e página no nível `error` e avança para a próxima página na mesma coleta. O cursor é atualizado imediatamente, e os produtos já capturados são preservados durante esse avanço.
+- Limita o avanço a três páginas com erro consecutivas por categoria; uma página consultada com sucesso reinicia essa contagem. Ao atingir o limite em um lote novo, aplica a regra de categoria incompleta: descarta os itens adicionados daquela categoria e tenta a próxima, até completar uma volta. Se houver produtos residuais de um lote anterior, preserva-os e encerra a tentativa para o ciclo principal tentar novamente após 60 segundos, começando pela página avançada. Isso evita um loop infinito quando a API permanece indisponível.
+- Autenticação recusada, rate limit, timeout, erro HTTP, resposta inválida e respostas com outros códigos GraphQL continuam interrompendo a coleta e gerando logs. Erros na listagem inicial de categorias também são propagados, pois o avanço de página com `10000` se aplica à consulta de produtos.
 - Em um lote novo, ignora uma categoria sem produtos suficientes e tenta a categoria seguinte; a coleta só é interrompida depois que todas as opções disponíveis forem esgotadas, impedindo a criação de um lote incompleto.
 
 #### Composição e embaralhamento do lote
 
-- `src/app.js` executa o coletor da Shopee antes do coletor do Mercado Livre.
+- `src/ciclo.js` executa o coletor da Shopee antes do coletor do Mercado Livre, somente após a confirmação do WhatsApp.
 - `src/lote.js` centraliza as cotas e valida a composição obrigatória do lote.
 - Cada coletor conta somente itens de sua própria origem. Isso permite recompor corretamente um lote residual depois de falhas de envio.
 - Uma categoria permanece ativa enquanto houver itens residuais daquela origem; a próxima categoria é escolhida depois que a fila correspondente zera. No Mercado Livre, se a categoria não conseguir completar a cota após esgotar os cards ou continuar indisponível após duas tentativas de seleção, seus itens residuais são descartados e a próxima categoria é tentada na mesma coleta.
@@ -111,13 +115,13 @@ Esse coletor depende fortemente de textos, seletores CSS e comportamento da inte
 
 #### Disparo de mensagens
 
-- `src/disparador.js`: recebe a fila, inclui a categoria de cada produto na legenda, prepara um atraso aleatório de `1` a `10` minutos para cada item e inicializa o cliente do WhatsApp.
+- `src/disparador.js`: recebe a fila e a sessão já verificada, inclui a categoria de cada produto na legenda e prepara um atraso aleatório de `1` a `10` minutos para cada item. Quando chamado isoladamente, inicializa e verifica seu próprio cliente.
 - Baixa a imagem do produto, valida tipo e tamanho e cria uma mídia real do WhatsApp; a mensagem textual é enviada como legenda.
 - Cada imagem possui timeout de `20` segundos, limite de `10` MB e até `3` tentativas de download.
 - Se a imagem continuar indisponível, a mensagem não é enviada sem imagem e o produto permanece na fila para uma tentativa futura.
 - Cada tarefa recebe um item exclusivo, formata a mensagem e realiza o envio. O item somente é removido da fila depois da confirmação do envio.
 - Os temporizadores são criados em paralelo sobre o lote já embaralhado. Portanto, a ordem real também depende dos atrasos sorteados, e vários itens podem ser enviados praticamente ao mesmo tempo quando recebem atrasos iguais.
-- O disparador espera todas as tarefas terminarem, preserva na fila os itens que falharem e encerra o cliente ao fim do lote.
+- O disparador espera todas as tarefas terminarem e preserva na fila os itens que falharem. No fluxo principal, o orquestrador encerra a sessão ao fim da tentativa; na execução isolada, o próprio disparador a encerra. Cada erro de envio é registrado com sua causa e stack, além do resumo de falhas do lote.
 - A regra de localização do destino está atualmente embutida no código. Por segurança e flexibilidade, ela deve migrar para configuração externa; nenhum dado desse destino é registrado neste documento.
 
 O disparador valida de forma síncrona que recebeu exatamente 20 itens. Como coleta e disparo são sequenciais, ele não fica aguardando uma fila ser preenchida em paralelo.
@@ -127,8 +131,12 @@ O disparador valida de forma síncrona que recebeu exatamente 20 itens. Como col
 - `src/gerenciador-mensagens.js`: cria o cliente de `whatsapp-web.js` com autenticação local.
 - Exibe um QR Code no terminal quando uma nova autenticação é necessária.
 - Trata os eventos de cliente pronto, falha de autenticação e desconexão.
+- Aguarda o evento `ready` por até 120 segundos e captura também rejeições assíncronas de `initialize()`. Falhas e timeouts são registrados como erros e impedem as coletas.
+- Antes de cada coleta, exige estado `CONNECTED`, localiza o grupo configurado e envia uma mensagem textual de verificação para a própria conta conectada. A mensagem precisa ter identificador válido e confirmação do servidor (`ACK >= 1`); não depende de leitura ou resposta humana. O teste não publica mensagens no grupo.
+- Toda a verificação tem limite de 30 segundos, incluindo consulta de estado, localização do destino, envio e espera da confirmação. Falha de consulta, destino ausente, conta indisponível, envio recusado, desconexão e ausência de confirmação bloqueiam as coletas e geram logs com a causa e stack.
+- A confirmação comprova o envio de texto pela conta naquele momento; o envio posterior de imagens e as permissões do grupo ainda podem falhar e são tratados pelo disparador.
 - Localiza diretamente apenas o destino necessário, sem serializar todo o histórico de conversas.
-- Um patch de compatibilidade trata a mudança de identificadores introduzida pelo WhatsApp Web e é reaplicado pelo npm após a instalação.
+- Um patch de compatibilidade trata a mudança de identificadores introduzida pelo WhatsApp Web e é reaplicado pelo npm após a instalação. Ele também remove `__x_id` do objeto da mensagem antes de entregá-lo ao WhatsApp, impedindo que o identificador interno da mídia substitua o identificador da mensagem e cause o erro `Data passed to getter must include an id property` no envio de imagens com legenda.
 - Dados locais de autenticação e cache são mantidos em diretórios gerados pela biblioteca e não devem ser versionados, compartilhados nem documentados com seus conteúdos.
 
 #### Logs
@@ -144,13 +152,14 @@ O disparador valida de forma síncrona que recebeu exatamente 20 itens. Como col
 2. `index.js` carrega `server.js`.
 3. `server.js` importa `src/app.js` e abre o servidor Express.
 4. `src/app.js` cria uma fila vazia e inicia um laço contínuo.
-5. O coletor da Shopee escolhe a próxima categoria, consulta a API de afiliados e completa sua cota de 10 itens filtrados.
-6. O coletor do Mercado Livre abre o navegador, escolhe a próxima categoria disponível na interface e completa sua própria cota de 10 itens.
-7. O orquestrador valida a composição exata de 10 + 10 e embaralha os 20 itens.
-8. O disparador inicializa o cliente do WhatsApp e agenda os itens da fila.
-9. Cada item é formatado, enviado após o atraso sorteado e removido somente após a confirmação.
-10. Ao concluir os 20 envios, o cliente é encerrado e o ciclo volta à coleta da Shopee.
-11. Erros preservam os itens pendentes; após `60` segundos, cada coletor recompõe apenas a própria cota.
+5. O orquestrador inicializa o WhatsApp, verifica conexão e destino e aguarda confirmação do servidor para uma mensagem enviada à própria conta. Qualquer falha é registrada e impede ambas as coletas.
+6. Após a confirmação, o coletor da Shopee escolhe a próxima categoria, consulta a API de afiliados e completa sua cota de 10 itens filtrados.
+7. O coletor do Mercado Livre abre o navegador, escolhe a próxima categoria disponível na interface e completa sua própria cota de 10 itens.
+8. O orquestrador valida a composição exata de 10 + 10 e embaralha os 20 itens.
+9. O disparador reutiliza o cliente e o destino verificados e agenda os itens da fila.
+10. Cada item é formatado, enviado após o atraso sorteado e removido somente após a confirmação.
+11. Ao terminar a tentativa, o cliente é encerrado. O próximo ciclo começa novamente pela verificação do WhatsApp.
+12. Erros preservam os itens pendentes e são registrados em `logs/app.txt` e `logs/error.txt`; após `60` segundos, uma nova tentativa verifica o WhatsApp antes de cada coletor recompor apenas a própria cota.
 
 ## 6. Estrutura do repositório
 
@@ -162,6 +171,7 @@ robo_mensagens/
 │   └── whatsapp-web.js+1.34.7.patch # Compatibilidade com IDs atuais do WhatsApp Web
 ├── src/
 │   ├── app.js                  # Orquestra o ciclo e mantém a fila em memória
+│   ├── ciclo.js                # Verifica o WhatsApp e executa coleta e disparo
 │   ├── coletor.js              # Coletor ativo do Mercado Livre
 │   ├── coletor-shopee.js       # Coletor ativo da API de afiliados Shopee
 │   ├── disparador.js           # Agenda, formata e envia mensagens
@@ -380,6 +390,12 @@ Com essas interfaces, a aplicação pode trocar o scraping por API, incluir nova
 ## 13. Estratégia de testes
 
 A suíte automatizada atual cobre listagem e alternância de categorias, filtro da Shopee por categoria, assinatura e avanço de páginas da API, cursores independentes dos cards do Mercado Livre, carregamento por rolagem, inclusão da categoria na mensagem, cotas por origem, validação do lote de 20 itens, embaralhamento, imagens e localização isolada do destino. Sua execução não abre um navegador real nem realiza disparos reais.
+
+A recuperação da Shopee cobre avanço após erro `10000`, logs com categoria e página, preservação dos itens já coletados e da deduplicação, limite de três falhas consecutivas, alternância de categoria, encerramento após uma volta sem sucesso e retomada de um lote residual na página avançada. Também verifica que outros códigos de erro, inclusive respostas com códigos mistos, continuam sendo propagados.
+
+Os testes de WhatsApp cobrem inicialização síncrona e assíncrona, autenticação, desconexão, timeout, envio para a própria conta e confirmação antes ou depois do retorno de `sendMessage`. Verificam rejeição de ACK de outra mensagem, falhas nas consultas e no envio, limpeza dos listeners e registro dos erros. Os testes do ciclo verificam que nenhuma coleta começa antes da confirmação, que falhas preservam a fila, que o disparador reutiliza a sessão e que cada nova tentativa repete a verificação após a espera de 60 segundos.
+
+O teste do patch de mídia executa a função de envio instalada da biblioteca em um contexto isolado, simulando os módulos internos do WhatsApp. Reproduz o conflito com `__x_id`, verifica a preservação do identificador da mensagem, da legenda e dos campos de upload e cobre o envio de texto usado na verificação inicial, sem rede nem mensagens reais.
 
 Os testes de ciclo de vida do navegador do Mercado Livre também simulam ciclos sucessivos com abas restauradas, reaproveitamento da aba inicial, criação de aba quando necessária e encerramento após sucesso ou falhas de navegação, listagem e fechamento de abas.
 
