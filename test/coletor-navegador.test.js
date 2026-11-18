@@ -2,9 +2,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { resolve } = require('node:path');
 const { runInNewContext } = require('node:vm');
-const puppeteer = require('puppeteer');
+const { default: puppeteer, TimeoutError } = require('puppeteer');
 const coletor = require('../src/coletor');
-const { URL_ABA_INICIAL } = require('../src/navegador-mercado-livre');
+const { URL_AFILIADOS } = require('../src/navegador-mercado-livre');
 
 function criarNavegador(quantidadeAbas, { erroNavegacao, erroFecharAba } = {}) {
     const abas = [];
@@ -123,9 +123,25 @@ test('Mercado Livre usa a aba aberta pelo Chrome instalado e fecha a aba restaur
     const browser = criarNavegador(2);
     const [, abaInicial] = await browser.pages();
     browser.waitForTarget = async (corresponde, { timeout }) => {
-        assert.equal(timeout, 15000);
+        assert.equal(timeout, 30000);
+        assert.equal(corresponde({ type: () => 'page', url: () => '' }), false);
         assert.equal(corresponde({ type: () => 'page', url: () => 'about:blank' }), false);
-        assert.equal(corresponde({ type: () => 'page', url: () => URL_ABA_INICIAL }), true);
+        assert.equal(corresponde({ type: () => 'page', url: () => `${URL_AFILIADOS}/?origem=login` }), true);
+        assert.equal(corresponde({ type: () => 'page', url: () => 'https://www.mercadolivre.com/jms/mlb/lgz/login' }), true);
+        assert.equal(corresponde({ type: () => 'page', url: () => 'https://example.com/afiliados' }), false);
+        // O DevTools anuncia o alvo antes de Page.url() expor o endereço.
+        t.mock.method(abaInicial, 'url', () => '');
+        t.mock.method(abaInicial, 'waitForFunction', async (condicao, opcoes, ...args) => {
+            if (args.length) return;
+            assert.equal(opcoes.timeout, 15000);
+            const verificarDocumento = (url, readyState) => runInNewContext(`(${condicao})()`, {
+                window: { location: new URL(url) }, document: { readyState }
+            });
+            assert.equal(verificarDocumento('about:blank', 'complete'), false);
+            assert.equal(verificarDocumento(URL_AFILIADOS, 'loading'), false);
+            assert.equal(verificarDocumento(URL_AFILIADOS, 'complete'), URL_AFILIADOS);
+            return { jsonValue: async () => URL_AFILIADOS, dispose: async () => {} };
+        });
         return { page: async () => abaInicial };
     };
     const launch = t.mock.method(puppeteer, 'launch', async () => browser);
@@ -137,11 +153,11 @@ test('Mercado Livre usa a aba aberta pelo Chrome instalado e fecha a aba restaur
     assert.equal(opcoesChrome.executablePath, caminhoChrome);
     assert.equal(opcoesChrome.userDataDir, resolve(__dirname, '../perfil/chrome-instalado'));
     assert.equal(opcoesChrome.waitForInitialPage, false);
-    assert.ok(opcoesChrome.args.includes(URL_ABA_INICIAL));
+    assert.ok(opcoesChrome.args.includes(URL_AFILIADOS));
     assert.deepEqual(opcoesChrome.ignoreDefaultArgs, ['--password-store=basic', '--use-mock-keychain']);
     assert.equal(fila.length, 1);
     assert.equal(browser.novasAbas, 0);
-    assert.deepEqual(browser.eventos.slice(0, 2), ['fechar-aba-0', 'navegar-1']);
+    assert.deepEqual(browser.eventos, ['fechar-aba-0', 'fechar-aba-1', 'fechar-navegador']);
     assert.equal(browser.fechado, true);
 });
 
@@ -382,7 +398,7 @@ test('Mercado Livre recupera timeout de categoria recarregando a mesma aba', asy
     const { page, browser, opcoes, launch } = await simularCategorias(t, { Casa: [true] });
     let tentativas = 0;
     t.mock.method(page, 'waitForFunction', async (funcao, config, texto) => {
-        if (texto === 'casa' && tentativas++ === 0) throw new puppeteer.TimeoutError('Waiting failed');
+        if (texto === 'casa' && tentativas++ === 0) throw new TimeoutError('Waiting failed');
     });
     const fila = [];
 
@@ -402,7 +418,7 @@ test('Mercado Livre pula categoria indisponível após duas tentativas sem colet
     t.mock.method(page, 'waitForFunction', async (funcao, config, texto) => {
         if (texto === 'ausente') {
             tentativas += 1;
-            throw new puppeteer.TimeoutError('Waiting failed');
+            throw new TimeoutError('Waiting failed');
         }
     });
     const pendente = { origem: 'mercado-livre', categoria: 'Ausente', link: 'https://example.com/oferta/0' };
@@ -425,7 +441,7 @@ test('Mercado Livre encerra uma volta de categorias indisponíveis sem tentativa
     t.mock.method(page, 'waitForFunction', async (funcao, config, texto) => {
         if (['ausente', 'outra'].includes(texto)) {
             tentativas += 1;
-            throw new puppeteer.TimeoutError('Waiting failed');
+            throw new TimeoutError('Waiting failed');
         }
     });
 
@@ -444,7 +460,7 @@ test('Mercado Livre preserva os itens quando o menu Categorias inteiro está ind
     t.mock.method(page, 'waitForFunction', async (funcao, config, texto) => {
         if (texto === 'categorias') {
             tentativas += 1;
-            throw new puppeteer.TimeoutError('Waiting failed');
+            throw new TimeoutError('Waiting failed');
         }
     });
     const pendente = { origem: 'mercado-livre', categoria: 'Casa' };

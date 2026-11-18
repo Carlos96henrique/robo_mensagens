@@ -1,6 +1,6 @@
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer').default;
 const logger = require('./gerenciador-log');
-const { URL_AFILIADOS, URL_ABA_INICIAL, opcoesNavegadorMercadoLivre } = require('./navegador-mercado-livre');
+const { URL_AFILIADOS, opcoesNavegadorMercadoLivre } = require('./navegador-mercado-livre');
 
 const CLASS_NAME = 'coletor';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -270,10 +270,17 @@ function paginaDeAutenticacao(url) {
             || /\/(?:login|account-verification)(?:\/|$)/.test(pathname));
 }
 
-async function abrirAfiliados(page) {
+function paginaDoPortalAfiliados(url) {
+    const { origin, pathname } = new URL(url);
+    const destino = new URL(URL_AFILIADOS);
+    return origin === destino.origin
+        && (pathname === destino.pathname || pathname.startsWith(`${destino.pathname}/`));
+}
+
+async function abrirAfiliados(page, urlInicial) {
     const opcoesNavegacao = { waitUntil: 'domcontentloaded' };
-    await page.goto(URL_AFILIADOS, opcoesNavegacao);
-    if (!paginaDeAutenticacao(page.url())) return;
+    if (!urlInicial) await page.goto(URL_AFILIADOS, opcoesNavegacao);
+    if (!paginaDeAutenticacao(urlInicial || page.url())) return;
 
     logger.warn('Mercado Livre: faça login na aba do Chromium. A coleta será retomada quando a área de afiliados abrir. Se necessário, abra Afiliados nessa mesma aba.');
     const { origin, pathname } = new URL(URL_AFILIADOS);
@@ -293,9 +300,9 @@ async function abrirAfiliados(page) {
     } while (paginaDeAutenticacao(page.url()));
 }
 
-async function carregarAfiliadosComFiltros(page, estadoNavegacao) {
+async function carregarAfiliadosComFiltros(page, estadoNavegacao, urlInicial) {
     for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_FILTROS; tentativa += 1) {
-        await abrirAfiliados(page);
+        await abrirAfiliados(page, tentativa === 1 ? urlInicial : undefined);
         logger.info('Página carregada com sucesso!');
 
         try {
@@ -401,13 +408,37 @@ async function coletarProduto(page, card) {
 
 async function prepararPaginaColeta(browser, chromeInstalado) {
     let page;
+    let urlInicial;
     if (chromeInstalado) {
-        const alvo = await browser.waitForTarget(
-            target => target.type() === 'page' && target.url() === URL_ABA_INICIAL,
-            { timeout: 15000 }
-        );
+        let alvo;
+        try {
+            alvo = await browser.waitForTarget(target => {
+                const url = target.url();
+                return target.type() === 'page' && URL.canParse(url)
+                    && (paginaDoPortalAfiliados(url) || paginaDeAutenticacao(url));
+            }, { timeout: 30000 });
+        } catch (cause) {
+            if (cause.name !== 'TimeoutError') throw cause;
+            const versao = await browser.version().catch(() => 'versão indisponível');
+            const alvos = browser.targets().map(target => {
+                const url = URL.parse(target.url());
+                const origem = url?.origin === 'null' ? url.protocol : url?.origin;
+                return `${target.type()} (${origem || 'sem URL'})`;
+            });
+            throw new Error(`O Puppeteer não encontrou a aba de afiliados ou de login em ${versao} em 30 segundos. Alvos detectados: ${alvos.join(', ') || 'nenhum'}.`, { cause });
+        }
         page = await alvo.page();
         if (!page) throw new Error('A aba de coleta aberta pelo Chrome está indisponível.');
+        // O alvo do Chrome pode ser anunciado antes de a página receber o primeiro documento.
+        const documento = await page.waitForFunction(() => {
+            return window.location.protocol === 'https:' && document.readyState !== 'loading'
+                ? window.location.href : false;
+        }, { timeout: 15000 });
+        try {
+            urlInicial = await documento.jsonValue();
+        } finally {
+            await documento.dispose();
+        }
     }
 
     const paginas = await browser.pages();
@@ -417,7 +448,7 @@ async function prepararPaginaColeta(browser, chromeInstalado) {
         if (aba !== page) await aba.close({ runBeforeUnload: false });
     }
 
-    return page;
+    return { page, urlInicial };
 }
 
 async function encerrarNavegador(browser) {
@@ -481,10 +512,11 @@ async function automatizarPagina(listaProdutos, {
             estadoNavegacao.categoriaConcluida = false;
         }
 
-        const opcoesNavegador = opcoesNavegadorMercadoLivre();
+        const opcoesNavegador = await opcoesNavegadorMercadoLivre();
+        const chromeInstalado = Boolean(opcoesNavegador.executablePath);
         browser = await puppeteer.launch(opcoesNavegador);
         etapa = 'selecionar a aba de coleta';
-        const page = await prepararPaginaColeta(browser, Boolean(opcoesNavegador.executablePath));
+        const { page, urlInicial } = await prepararPaginaColeta(browser, chromeInstalado);
         const categoriasTentadas = new Set();
 
         while (quantidadeMercadoLivre < limite) {
@@ -492,7 +524,9 @@ async function automatizarPagina(listaProdutos, {
             let categoriaIndisponivel = false;
             etapa = 'abrir o portal de afiliados ou aplicar os filtros';
             try {
-                categoria = await carregarAfiliadosComFiltros(page, estadoNavegacao);
+                categoria = await carregarAfiliadosComFiltros(
+                    page, estadoNavegacao, categoriasTentadas.size === 0 ? urlInicial : undefined
+                );
             } catch (error) {
                 if (error.code !== 'CATEGORIA_INDISPONIVEL') throw error;
                 categoria = error.categoria;
@@ -603,5 +637,6 @@ module.exports = {
     criarEstadoNavegacao,
     listarCategoriasVisiveis,
     obterProximoCard,
+    prepararPaginaColeta,
     selecionarCategoria
 };
