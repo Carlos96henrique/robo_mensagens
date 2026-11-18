@@ -108,7 +108,7 @@ async function simularCategorias(t, disponibilidade, indiceInicial = 0) {
     return { browser, page, opcoes, consultas, launch };
 }
 
-test('Mercado Livre usa o executável do Chrome instalado e o perfil de login manual quando configurado', async t => {
+test('Mercado Livre cria a aba de coleta no Chrome instalado usando o perfil de login manual', async t => {
     const configuracaoAnterior = process.env.MERCADO_LIVRE_CHROME;
     t.after(() => {
         if (configuracaoAnterior === undefined) delete process.env.MERCADO_LIVRE_CHROME;
@@ -117,16 +117,23 @@ test('Mercado Livre usa o executável do Chrome instalado e o perfil de login ma
     process.env.MERCADO_LIVRE_CHROME = 'instalado';
     const caminhoChrome = resolve('Chrome instalado', 'chrome');
     const localizarChrome = t.mock.method(puppeteer, 'executablePath', () => caminhoChrome);
-    const { opcoes, launch } = await simularCategorias(t, { Casa: [1] });
+    const setTimeoutOriginal = global.setTimeout;
+    t.mock.method(global, 'setTimeout', callback => setTimeoutOriginal(callback, 0));
+    const browser = criarNavegador(0);
+    const launch = t.mock.method(puppeteer, 'launch', async () => browser);
 
-    const fila = await coletor.automatizarPagina([], opcoes);
+    const fila = await coletor.automatizarPagina([], opcoesColeta());
 
     assert.deepEqual(localizarChrome.mock.calls[0].arguments, ['chrome']);
     const opcoesChrome = launch.mock.calls[0].arguments[0];
     assert.equal(opcoesChrome.executablePath, caminhoChrome);
     assert.equal(opcoesChrome.userDataDir, resolve(__dirname, '../perfil/chrome-instalado'));
+    assert.equal(opcoesChrome.waitForInitialPage, false);
+    assert.ok(opcoesChrome.args.includes('--no-startup-window'));
     assert.deepEqual(opcoesChrome.ignoreDefaultArgs, ['--password-store=basic', '--use-mock-keychain']);
     assert.equal(fila.length, 1);
+    assert.equal(browser.novasAbas, 1);
+    assert.equal(browser.fechado, true);
 });
 
 const urlAfiliados = 'https://www.mercadolivre.com.br/afiliados';

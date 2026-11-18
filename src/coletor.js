@@ -400,7 +400,7 @@ async function coletarProduto(page, card) {
 }
 
 async function prepararPaginaColeta(browser) {
-    // O Chromium já abre uma aba e pode restaurar outras do perfil persistente.
+    // Se o navegador abrir ou restaurar abas, mantém apenas a primeira.
     const paginas = await browser.pages();
     const page = paginas[0] || await browser.newPage();
 
@@ -471,14 +471,7 @@ async function automatizarPagina(listaProdutos, {
             estadoNavegacao.categoriaConcluida = false;
         }
 
-        browser = await puppeteer.launch({
-            headless: false,
-            ...opcoesNavegadorMercadoLivre(),
-            defaultViewport: null,
-            args: [
-                '--window-size=1600,900',
-            ]
-        });
+        browser = await puppeteer.launch(opcoesNavegadorMercadoLivre());
         const page = await prepararPaginaColeta(browser);
         const categoriasTentadas = new Set();
 
@@ -575,8 +568,8 @@ async function automatizarPagina(listaProdutos, {
         estadoNavegacao.categoriaConcluida = true;
         logger.info(`Cota do Mercado Livre atingida (${limite}). Coleta concluída.`);
     } catch (error) {
-        logger.error(`Ocorreu um erro: ${CLASS_NAME}`);
-        logger.error(`Erro ao automatizar ao capturar link: ${error.message}, stack: ${error.stack}`);
+        const etapa = browser ? 'preparar a aba ou coletar ofertas' : 'inicializar o navegador';
+        logger.error(`Mercado Livre (${CLASS_NAME}): falha ao ${etapa}: ${error.message}, stack: ${error.stack}`);
         throw error;
     } finally {
         if (browser) {
