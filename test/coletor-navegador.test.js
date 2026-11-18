@@ -162,6 +162,22 @@ test('Mercado Livre usa a aba aberta pelo Chrome instalado e fecha a aba restaur
 });
 
 const urlAfiliados = 'https://www.mercadolivre.com.br/afiliados';
+
+test('Mercado Livre orienta a atualização quando o Chrome 110 não expõe a aba', async () => {
+    const timeout = new TimeoutError('Timed out after waiting 30000ms');
+    const browser = {
+        async waitForTarget() { throw timeout; },
+        async version() { return 'Chrome/110.0.5481.100'; },
+        targets() { return [{ type: () => 'browser', url: () => '' }]; }
+    };
+
+    await assert.rejects(coletor.prepararPaginaColeta(browser, true), error => {
+        assert.equal(error.cause, timeout);
+        assert.match(error.message, /Chrome\/110\.0\.5481\.100.*browser \(sem URL\).*Atualize o Chrome selecionado/);
+        return true;
+    });
+});
+
 for (const { login, destino, navegacoesEsperadas } of [
     {
         login: 'https://www.mercadolivre.com/jms/mlb/lgz/login',

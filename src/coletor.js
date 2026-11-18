@@ -1,4 +1,4 @@
-const puppeteer = require('puppeteer').default;
+const { default: puppeteer, PUPPETEER_REVISIONS } = require('puppeteer');
 const logger = require('./gerenciador-log');
 const { URL_AFILIADOS, opcoesNavegadorMercadoLivre } = require('./navegador-mercado-livre');
 
@@ -420,12 +420,17 @@ async function prepararPaginaColeta(browser, chromeInstalado) {
         } catch (cause) {
             if (cause.name !== 'TimeoutError') throw cause;
             const versao = await browser.version().catch(() => 'versão indisponível');
+            const versaoChrome = Number(versao.match(/(?:Chrome|Chromium)\/(\d+)/)?.[1]);
+            const versaoValidada = PUPPETEER_REVISIONS.chrome;
+            const orientacao = versaoChrome < Number(versaoValidada.split('.')[0])
+                ? ` Atualize o Chrome selecionado ou ajuste MERCADO_LIVRE_CHROME para o executável atual. A versão validada com este Puppeteer é ${versaoValidada}.`
+                : '';
             const alvos = browser.targets().map(target => {
                 const url = URL.parse(target.url());
                 const origem = url?.origin === 'null' ? url.protocol : url?.origin;
                 return `${target.type()} (${origem || 'sem URL'})`;
             });
-            throw new Error(`O Puppeteer não encontrou a aba de afiliados ou de login em ${versao} em 30 segundos. Alvos detectados: ${alvos.join(', ') || 'nenhum'}.`, { cause });
+            throw new Error(`O Puppeteer não encontrou a aba de afiliados ou de login em ${versao} em 30 segundos. Alvos detectados: ${alvos.join(', ') || 'nenhum'}.${orientacao}`, { cause });
         }
         page = await alvo.page();
         if (!page) throw new Error('A aba de coleta aberta pelo Chrome está indisponível.');

@@ -83,3 +83,65 @@ test('registra o erro e repete a verificação antes de coletar na tentativa seg
     assert.equal(log.mock.callCount(), 2);
     assert.match(log.mock.calls[0].arguments[0], /WhatsApp indisponível.*stack:/);
 });
+
+for (const falhaDeEnvio of [false, true]) {
+    test(`ciclo contínuo ${falhaDeEnvio ? 'reverifica o mesmo cliente depois de uma falha real de envio' : 'reutiliza a sessão após lotes bem-sucedidos e erros sem relação com o envio'}`, async t => {
+        const eventos = prepararCiclo(t);
+        const fila = [];
+        const erro = new Error('Falha simulada');
+        if (falhaDeEnvio) erro.code = disparador.FALHA_ENVIO_WHATSAPP;
+        const fim = new Error('Fim do teste');
+        let ciclos = 0;
+        let esperas = 0;
+
+        await assert.rejects(iniciarCicloContinuo(fila, {
+            async executar(lista, canal) {
+                ciclos += 1;
+                if (ciclos === 2) throw erro;
+                if (ciclos === 4) throw fim;
+                await executarCiclo(lista, canal);
+            },
+            async aguardar(ms) {
+                assert.equal(ms, 60000);
+                if (++esperas === 2) throw fim;
+            }
+        }), fim);
+
+        assert.deepEqual(eventos, [
+            'inicializar', 'verificar', 'shopee', 'mercado-livre', 'enviar',
+            ...(falhaDeEnvio ? ['verificar'] : []),
+            'shopee', 'mercado-livre', 'enviar', 'encerrar'
+        ]);
+        assert.deepEqual(fila, []);
+    });
+}
+
+test('ciclo contínuo recria o cliente quando a verificação após a falha de envio também falha', async t => {
+    const clientes = [{}, {}];
+    let iniciado = 0;
+    let verificacoes = 0;
+    const inicializar = t.mock.method(gerenciador, 'inicializaGerenciador', async () => clientes[iniciado++]);
+    const verificar = t.mock.method(gerenciador, 'verificarDisponibilidade', async client => {
+        verificacoes += 1;
+        if (verificacoes === 2) throw new Error('Cliente desconectado');
+        return { client };
+    });
+    const encerrar = t.mock.method(gerenciador, 'encerrarGerenciador', async () => {});
+    const falha = new Error('Envio recusado');
+    falha.code = disparador.FALHA_ENVIO_WHATSAPP;
+    const fim = new Error('Fim do teste');
+    let esperas = 0;
+
+    await assert.rejects(iniciarCicloContinuo([], {
+        async executar(_fila, { client }) {
+            throw client === clientes[0] ? falha : fim;
+        },
+        async aguardar() {
+            if (++esperas === 3) throw fim;
+        }
+    }), fim);
+
+    assert.equal(inicializar.mock.callCount(), 2);
+    assert.deepEqual(verificar.mock.calls.map(chamada => chamada.arguments[0]), [clientes[0], ...clientes]);
+    assert.deepEqual(encerrar.mock.calls.map(chamada => chamada.arguments[0]), clientes);
+});

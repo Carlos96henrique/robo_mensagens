@@ -73,10 +73,11 @@ test('rejeita produto sem URL de imagem', async () => {
     );
 });
 
-for (const isolado of [false, true]) {
-    test(`disparador ${isolado ? 'verifica e encerra sua própria sessão' : 'reutiliza sessão e registra a causa de cada envio que falha'}`, async t => {
+for (const cenario of ['isolado', 'rejeitado', 'sem confirmação', 'imagem inválida']) {
+    test(`disparador trata envio ${cenario}`, async t => {
+        const isolado = cenario === 'isolado';
         const setTimeoutOriginal = global.setTimeout;
-        t.mock.method(global, 'setTimeout', (callback, ms) => setTimeoutOriginal(callback, ms >= 60000 ? 0 : ms));
+        t.mock.method(global, 'setTimeout', (callback, ms) => setTimeoutOriginal(callback, ms >= 60000 || ms === 2000 ? 0 : ms));
         t.mock.method(logger, 'info', () => {});
         const log = t.mock.method(logger, 'error', () => {});
         const conteudo = Buffer.from([0xff, 0xd8, 0xff]);
@@ -92,7 +93,9 @@ for (const isolado of [false, true]) {
                 assert.ok(media instanceof MessageMedia);
                 assert.equal(opcoes.waitUntilMsgSent, true);
                 envios += 1;
-                if (!isolado && envios === 1) throw new Error('Falha específica do WhatsApp');
+                if (cenario === 'rejeitado' && envios === 1) throw new Error('Falha específica do WhatsApp');
+                if (cenario === 'sem confirmação' && envios === 1) return undefined;
+                return { ack: 1 };
             }
         };
         const canal = { client, grupoId: 'grupo-ficticio@g.us' };
@@ -107,15 +110,22 @@ for (const isolado of [false, true]) {
             imagemUrl: 'https://example.invalid/imagem'
         })));
         const primeiroItem = fila[0];
+        if (cenario === 'imagem inválida') primeiroItem.imagemUrl = null;
         if (isolado) {
             await disparador.executar(fila);
             assert.equal(fila.length, 0);
         } else {
-            await assert.rejects(disparador.executar(fila, canal), /1 de 20 envio/);
+            await assert.rejects(disparador.executar(fila, canal), error => {
+                assert.match(error.message, /1 de 20 envio/);
+                assert.equal(error.code, cenario === 'imagem inválida' ? undefined : disparador.FALHA_ENVIO_WHATSAPP);
+                return true;
+            });
             assert.deepEqual(fila, [primeiroItem]);
-            assert.match(log.mock.calls[0].arguments[0], /Falha específica do WhatsApp.*stack:/);
+            if (cenario === 'rejeitado') {
+                assert.match(log.mock.calls[0].arguments[0], /Falha específica do WhatsApp.*stack:/);
+            }
         }
-        assert.equal(envios, 20);
+        assert.equal(envios, cenario === 'imagem inválida' ? 19 : 20);
         assert.equal(inicializar.mock.callCount(), isolado ? 1 : 0);
         assert.equal(verificar.mock.callCount(), isolado ? 1 : 0);
         assert.equal(encerrar.mock.callCount(), isolado ? 1 : 0);

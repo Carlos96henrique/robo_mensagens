@@ -8,6 +8,7 @@ const TIMEOUT_IMAGEM_MS = 20000;
 const TAMANHO_MAXIMO_IMAGEM_BYTES = 10 * 1024 * 1024;
 const MAX_TENTATIVAS_IMAGEM = 3;
 const INTERVALO_TENTATIVAS_IMAGEM_MS = 2000;
+const FALHA_ENVIO_WHATSAPP = 'FALHA_ENVIO_WHATSAPP';
 
 function getRandomIntInclusive(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -178,6 +179,7 @@ async function executar(mensagens, canal) {
     const filaMensagens = mensagens;
     const numeros = armazenarNumeros(filaMensagens.length);
     const client = canal?.client ?? await gerenciador.inicializaGerenciador();
+    let falhaNoWhatsApp = false;
 
     try {
         const { grupoId } = canal ?? await gerenciador.verificarDisponibilidade(client);
@@ -198,10 +200,18 @@ async function executar(mensagens, canal) {
 
                         const mensagem = await estruturarMensagem(anuncio);
                         const imagem = await baixarImagemComRetentativa(anuncio.imagemUrl);
-                        await client.sendMessage(grupoId, imagem, {
-                            caption: mensagem,
-                            waitUntilMsgSent: true
-                        });
+                        try {
+                            const enviada = await client.sendMessage(grupoId, imagem, {
+                                caption: mensagem,
+                                waitUntilMsgSent: true
+                            });
+                            if (!enviada || enviada.ack === -1) {
+                                throw new Error('O WhatsApp não confirmou o envio da mensagem.');
+                            }
+                        } catch (error) {
+                            falhaNoWhatsApp = true;
+                            throw error;
+                        }
                         removerMensagemEnviada(filaMensagens, anuncio);
                         logger.info(`Mensagem enviada após ${minutos} minuto(s).`);
                         resolve();
@@ -217,7 +227,9 @@ async function executar(mensagens, canal) {
         const falhas = resultados.filter(resultado => resultado.status === 'rejected');
 
         if (falhas.length > 0) {
-            throw new Error(`${falhas.length} de ${resultados.length} envio(s) falharam.`);
+            const erro = new Error(`${falhas.length} de ${resultados.length} envio(s) falharam.`);
+            if (falhaNoWhatsApp) erro.code = FALHA_ENVIO_WHATSAPP;
+            throw erro;
         }
 
         logger.info('Todos os disparos foram concluídos com sucesso.');
@@ -240,6 +252,7 @@ async function estruturarMensagem(anuncio) {
 }
 
 module.exports = {
+    FALHA_ENVIO_WHATSAPP,
     baixarImagem,
     baixarImagemComRetentativa,
     executar,
