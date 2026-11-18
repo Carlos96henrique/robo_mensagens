@@ -1,6 +1,6 @@
 const puppeteer = require('puppeteer');
 const logger = require('./gerenciador-log');
-const { URL_AFILIADOS, opcoesNavegadorMercadoLivre } = require('./navegador-mercado-livre');
+const { URL_AFILIADOS, URL_ABA_INICIAL, opcoesNavegadorMercadoLivre } = require('./navegador-mercado-livre');
 
 const CLASS_NAME = 'coletor';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -399,13 +399,22 @@ async function coletarProduto(page, card) {
     };
 }
 
-async function prepararPaginaColeta(browser) {
-    // Se o navegador abrir ou restaurar abas, mantém apenas a primeira.
-    const paginas = await browser.pages();
-    const page = paginas[0] || await browser.newPage();
+async function prepararPaginaColeta(browser, chromeInstalado) {
+    let page;
+    if (chromeInstalado) {
+        const alvo = await browser.waitForTarget(
+            target => target.type() === 'page' && target.url() === URL_ABA_INICIAL,
+            { timeout: 15000 }
+        );
+        page = await alvo.page();
+        if (!page) throw new Error('A aba de coleta aberta pelo Chrome está indisponível.');
+    }
 
-    for (const excedente of paginas.slice(1)) {
-        await excedente.close({ runBeforeUnload: false });
+    const paginas = await browser.pages();
+    page ??= paginas[0] || await browser.newPage();
+
+    for (const aba of paginas) {
+        if (aba !== page) await aba.close({ runBeforeUnload: false });
     }
 
     return page;
@@ -464,6 +473,7 @@ async function automatizarPagina(listaProdutos, {
     }
 
     let browser;
+    let etapa = 'inicializar o navegador';
 
     try {
         if (quantidadeMercadoLivre === 0 && estadoNavegacao.categoriaConcluida) {
@@ -471,13 +481,16 @@ async function automatizarPagina(listaProdutos, {
             estadoNavegacao.categoriaConcluida = false;
         }
 
-        browser = await puppeteer.launch(opcoesNavegadorMercadoLivre());
-        const page = await prepararPaginaColeta(browser);
+        const opcoesNavegador = opcoesNavegadorMercadoLivre();
+        browser = await puppeteer.launch(opcoesNavegador);
+        etapa = 'selecionar a aba de coleta';
+        const page = await prepararPaginaColeta(browser, Boolean(opcoesNavegador.executablePath));
         const categoriasTentadas = new Set();
 
         while (quantidadeMercadoLivre < limite) {
             let categoria;
             let categoriaIndisponivel = false;
+            etapa = 'abrir o portal de afiliados ou aplicar os filtros';
             try {
                 categoria = await carregarAfiliadosComFiltros(page, estadoNavegacao);
             } catch (error) {
@@ -487,6 +500,7 @@ async function automatizarPagina(listaProdutos, {
                 logger.warn(`Mercado Livre: ${error.message} Categoria ignorada após ${MAX_TENTATIVAS_FILTROS} tentativas.`);
             }
             categoriasTentadas.add(categoria.nome);
+            etapa = 'coletar produtos';
             let cards = categoriaIndisponivel ? [] : await page.$$('.poly-card');
 
             while (!categoriaIndisponivel && quantidadeMercadoLivre < limite) {
@@ -568,7 +582,6 @@ async function automatizarPagina(listaProdutos, {
         estadoNavegacao.categoriaConcluida = true;
         logger.info(`Cota do Mercado Livre atingida (${limite}). Coleta concluída.`);
     } catch (error) {
-        const etapa = browser ? 'preparar a aba ou coletar ofertas' : 'inicializar o navegador';
         logger.error(`Mercado Livre (${CLASS_NAME}): falha ao ${etapa}: ${error.message}, stack: ${error.stack}`);
         throw error;
     } finally {

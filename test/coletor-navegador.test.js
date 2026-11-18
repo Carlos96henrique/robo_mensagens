@@ -4,6 +4,7 @@ const { resolve } = require('node:path');
 const { runInNewContext } = require('node:vm');
 const puppeteer = require('puppeteer');
 const coletor = require('../src/coletor');
+const { URL_ABA_INICIAL } = require('../src/navegador-mercado-livre');
 
 function criarNavegador(quantidadeAbas, { erroNavegacao, erroFecharAba } = {}) {
     const abas = [];
@@ -108,7 +109,7 @@ async function simularCategorias(t, disponibilidade, indiceInicial = 0) {
     return { browser, page, opcoes, consultas, launch };
 }
 
-test('Mercado Livre cria a aba de coleta no Chrome instalado usando o perfil de login manual', async t => {
+test('Mercado Livre usa a aba aberta pelo Chrome instalado e fecha a aba restaurada', async t => {
     const configuracaoAnterior = process.env.MERCADO_LIVRE_CHROME;
     t.after(() => {
         if (configuracaoAnterior === undefined) delete process.env.MERCADO_LIVRE_CHROME;
@@ -119,7 +120,14 @@ test('Mercado Livre cria a aba de coleta no Chrome instalado usando o perfil de 
     const localizarChrome = t.mock.method(puppeteer, 'executablePath', () => caminhoChrome);
     const setTimeoutOriginal = global.setTimeout;
     t.mock.method(global, 'setTimeout', callback => setTimeoutOriginal(callback, 0));
-    const browser = criarNavegador(0);
+    const browser = criarNavegador(2);
+    const [, abaInicial] = await browser.pages();
+    browser.waitForTarget = async (corresponde, { timeout }) => {
+        assert.equal(timeout, 15000);
+        assert.equal(corresponde({ type: () => 'page', url: () => 'about:blank' }), false);
+        assert.equal(corresponde({ type: () => 'page', url: () => URL_ABA_INICIAL }), true);
+        return { page: async () => abaInicial };
+    };
     const launch = t.mock.method(puppeteer, 'launch', async () => browser);
 
     const fila = await coletor.automatizarPagina([], opcoesColeta());
@@ -129,10 +137,11 @@ test('Mercado Livre cria a aba de coleta no Chrome instalado usando o perfil de 
     assert.equal(opcoesChrome.executablePath, caminhoChrome);
     assert.equal(opcoesChrome.userDataDir, resolve(__dirname, '../perfil/chrome-instalado'));
     assert.equal(opcoesChrome.waitForInitialPage, false);
-    assert.ok(opcoesChrome.args.includes('--no-startup-window'));
+    assert.ok(opcoesChrome.args.includes(URL_ABA_INICIAL));
     assert.deepEqual(opcoesChrome.ignoreDefaultArgs, ['--password-store=basic', '--use-mock-keychain']);
     assert.equal(fila.length, 1);
-    assert.equal(browser.novasAbas, 1);
+    assert.equal(browser.novasAbas, 0);
+    assert.deepEqual(browser.eventos.slice(0, 2), ['fechar-aba-0', 'navegar-1']);
     assert.equal(browser.fechado, true);
 });
 
