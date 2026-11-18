@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { runInNewContext } = require('node:vm');
 const puppeteer = require('puppeteer');
 const coletor = require('../src/coletor');
 
@@ -12,18 +13,21 @@ function criarNavegador(quantidadeAbas, { erroNavegacao, erroFecharAba } = {}) {
     function criarAba() {
         const id = abas.length;
         let fechada = false;
+        let url = 'about:blank';
         const aba = {
             isClosed: () => fechada,
+            url: () => url,
             async close(opcoes) {
                 assert.equal(opcoes.runBeforeUnload, false);
                 eventos.push(`fechar-aba-${id}`);
                 if (erroFecharAba) throw erroFecharAba;
                 fechada = true;
             },
-            async goto() {
+            async goto(destino) {
                 eventos.push(`navegar-${id}`);
                 assert.equal(abas.filter(p => !p.isClosed()).length, 1);
                 if (erroNavegacao) throw erroNavegacao;
+                url = destino;
             },
             async waitForFunction() {},
             async evaluate(funcao, ...args) {
@@ -101,6 +105,72 @@ async function simularCategorias(t, disponibilidade, indiceInicial = 0) {
         }));
     });
     return { browser, page, opcoes, consultas, launch };
+}
+
+const urlAfiliados = 'https://www.mercadolivre.com.br/afiliados';
+for (const { login, destino, navegacoesEsperadas } of [
+    {
+        login: 'https://www.mercadolivre.com/jms/mlb/lgz/login',
+        destino: `${urlAfiliados}/?origem=login`,
+        navegacoesEsperadas: 1
+    },
+    {
+        login: 'https://www.mercadolivre.com.br/gz/account-verification',
+        destino: 'https://www.mercadolivre.com.br/',
+        navegacoesEsperadas: 2
+    }
+]) {
+    test(`Mercado Livre aguarda o login manual e retoma a coleta após abrir ${destino}`, async t => {
+        const { browser, page, opcoes, consultas } = await simularCategorias(t, { Casa: [1] });
+        const navegar = page.goto.bind(page);
+        let navegadorNoLogin = true;
+        const abertura = t.mock.method(page, 'goto', async url => navegadorNoLogin
+            ? navegar(login)
+            : navegar(url));
+        const esperaIniciada = Promise.withResolvers();
+        const loginManual = Promise.withResolvers();
+        const dispose = t.mock.fn(async () => {});
+        const espera = t.mock.method(page, 'waitForFunction', async (funcao, config, ...args) => {
+            if (config.timeout !== 0) return;
+            const verificaRetorno = url => runInNewContext(`(${funcao})(...args)`, {
+                window: { location: new URL(url) }, args
+            });
+            esperaIniciada.resolve(verificaRetorno);
+            await loginManual.promise;
+            return { dispose };
+        });
+        const itemShopee = { origem: 'shopee' };
+        const fila = [itemShopee];
+
+        const coleta = coletor.automatizarPagina(fila, opcoes);
+        const verificaRetorno = await Promise.race([
+            esperaIniciada.promise,
+            coleta.then(() => assert.fail('A coleta terminou sem aguardar o login.'))
+        ]);
+        try {
+            assert.equal(verificaRetorno(login), false);
+            assert.equal(verificaRetorno('https://www.mercadolivre.com/jms/mlb/lgz/msl/login'), false);
+            assert.equal(verificaRetorno('https://example.com/afiliados'), false);
+            assert.equal(verificaRetorno(destino), true);
+            assert.equal(espera.mock.callCount(), 1);
+            assert.equal(abertura.mock.callCount(), 1);
+            assert.deepEqual(fila, [itemShopee]);
+            assert.deepEqual(consultas, {});
+            assert.equal(browser.fechado, false);
+        } finally {
+            navegadorNoLogin = false;
+            await navegar(destino);
+            loginManual.resolve();
+            await coleta;
+        }
+
+        assert.equal(dispose.mock.callCount(), 1);
+        assert.equal(abertura.mock.callCount(), navegacoesEsperadas);
+        assert.deepEqual(consultas, { Casa: 1 });
+        assert.equal(fila[1].categoria, 'Casa');
+        assert.equal(browser.novasAbas, 0);
+        assert.equal(browser.fechado, true);
+    });
 }
 
 test('Mercado Livre pula categorias sem cards e coleta na mesma aba', async t => {

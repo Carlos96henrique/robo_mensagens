@@ -69,6 +69,7 @@ Importante: o processamento começa como efeito colateral da importação de `sr
 - `src/coletor.js`: abre um Chromium visível por meio do Puppeteer e reutiliza um perfil local do navegador.
 - Reutiliza a aba inicial do Chromium e fecha as demais abas encontradas na inicialização, incluindo possíveis abas restauradas do perfil; só cria uma aba quando não existe nenhuma.
 - Acessa a área de afiliados, aplica filtros predefinidos e procura cards de produtos no HTML.
+- Se a navegação abrir uma página de autenticação do Mercado Livre, mantém a aba aberta e aguarda o login manual sem limite de tempo. A coleta é retomada ao voltar à área de afiliados. Se o login terminar na página inicial, o coletor reabre a área de afiliados na mesma aba.
 - A espera e o clique dos filtros usam o mesmo critério de texto, visibilidade e habilitação, ignorando links e cards. Se um controle não estiver disponível em até 15 segundos, registra o nome do controle e recarrega a página na mesma aba para uma segunda tentativa. Uma categoria que continuar indisponível é descartada naquele ciclo, incluindo seus itens pendentes, e o coletor avança sem ler cards de um filtro não aplicado. Falhas nos controles gerais "Mais vendidos" ou "Categorias" encerram a tentativa após duas falhas e preservam a fila.
 - Para cada card, extrai título, preço e URL da imagem, aciona a geração do link de afiliado e lê o link pela área de transferência do navegador.
 - Adiciona objetos no formato `{ titulo, preco, link, imagemUrl, categoria, origem }` à fila.
@@ -431,13 +432,21 @@ Testes de ponta a ponta devem usar ambientes e destinos controlados, nunca conta
 
 ```bash
 npm install
+npx puppeteer browsers install chrome@146.0.7680.31
+npx puppeteer browsers install chrome
 cp .env.example .env
 npm start
 ```
 
+Os comandos `npx puppeteer browsers install` devem ser executados na pasta do projeto para baixar os navegadores necessários, inclusive ao instalar a aplicação em outra máquina. No estado atual das dependências, o Puppeteer usado pelo WhatsApp exige o Chrome `146.0.7680.31`; o segundo comando baixa a versão exigida pelo Puppeteer principal, usado no coletor do Mercado Livre.
+
+Execute a instalação dos navegadores e o robô com o mesmo usuário, sem `sudo`. Por padrão, os navegadores ficam em `~/.cache/puppeteer`, fora da pasta do projeto; copiar ou baixar o repositório não transfere esse cache. Se o log apresentar `Could not find Chrome`, execute novamente o comando de instalação com a versão informada no erro. Ao atualizar as dependências, a versão exigida pode mudar.
+
 Antes de iniciar, preencha no `.env` local as credenciais liberadas no painel da API de afiliados. O arquivo real é ignorado pelo Git.
 
 Na primeira autenticação do canal de mensagens, a aplicação pode solicitar leitura de um QR Code no terminal. Não capture, publique ou armazene esse QR Code em logs.
+
+Em uma máquina nova, ou quando a sessão do Mercado Livre expirar, faça login na aba do Chromium aberta pelo coletor. Se o site terminar em outra página, abra a área de afiliados nessa mesma aba para retomar a coleta. O perfil local em `./perfil` guarda a sessão para os próximos ciclos.
 
 O processo abre a porta `3000`, embora ainda não existam endpoints HTTP. A execução deve ser supervisionada, pois o ciclo é contínuo.
 

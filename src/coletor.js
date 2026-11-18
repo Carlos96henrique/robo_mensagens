@@ -262,9 +262,40 @@ async function configurarFiltrosAfiliados(page, estadoNavegacao) {
     return categoria;
 }
 
+function paginaDeAutenticacao(url) {
+    const { hostname, pathname } = new URL(url);
+    return /(?:^|\.)mercadoli(?:vre|bre)\.com(?:\.br)?$/.test(hostname)
+        && (/^(?:login|auth)\./.test(hostname)
+            || /^\/jms\/mlb\/lgz(?:\/|$)/.test(pathname)
+            || /\/(?:login|account-verification)(?:\/|$)/.test(pathname));
+}
+
+async function abrirAfiliados(page) {
+    const opcoesNavegacao = { waitUntil: 'domcontentloaded' };
+    await page.goto(URL_AFILIADOS, opcoesNavegacao);
+    if (!paginaDeAutenticacao(page.url())) return;
+
+    logger.warn('Mercado Livre: faça login na aba do Chromium. A coleta será retomada quando a área de afiliados abrir. Se necessário, abra Afiliados nessa mesma aba.');
+    const { origin, pathname } = new URL(URL_AFILIADOS);
+    const caminhosInicio = ['/', '/home', '/home/'];
+
+    do {
+        const retorno = await page.waitForFunction((origem, caminho, inicios) => {
+            const { origin, pathname } = window.location;
+            return origin === origem && (inicios.includes(pathname)
+                || pathname === caminho || pathname.startsWith(`${caminho}/`));
+        }, { timeout: 0, polling: 500 }, origin, pathname, caminhosInicio);
+        await retorno.dispose();
+
+        if (caminhosInicio.includes(new URL(page.url()).pathname)) {
+            await page.goto(URL_AFILIADOS, opcoesNavegacao);
+        }
+    } while (paginaDeAutenticacao(page.url()));
+}
+
 async function carregarAfiliadosComFiltros(page, estadoNavegacao) {
     for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_FILTROS; tentativa += 1) {
-        await page.goto(URL_AFILIADOS, { waitUntil: 'networkidle2' });
+        await abrirAfiliados(page);
         logger.info('Página carregada com sucesso!');
 
         try {
