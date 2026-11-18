@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { resolve } = require('node:path');
 const { runInNewContext } = require('node:vm');
 const puppeteer = require('puppeteer');
 const coletor = require('../src/coletor');
@@ -106,6 +107,27 @@ async function simularCategorias(t, disponibilidade, indiceInicial = 0) {
     });
     return { browser, page, opcoes, consultas, launch };
 }
+
+test('Mercado Livre usa o executável do Chrome instalado e o perfil de login manual quando configurado', async t => {
+    const configuracaoAnterior = process.env.MERCADO_LIVRE_CHROME;
+    t.after(() => {
+        if (configuracaoAnterior === undefined) delete process.env.MERCADO_LIVRE_CHROME;
+        else process.env.MERCADO_LIVRE_CHROME = configuracaoAnterior;
+    });
+    process.env.MERCADO_LIVRE_CHROME = 'instalado';
+    const caminhoChrome = resolve('Chrome instalado', 'chrome');
+    const localizarChrome = t.mock.method(puppeteer, 'executablePath', () => caminhoChrome);
+    const { opcoes, launch } = await simularCategorias(t, { Casa: [1] });
+
+    const fila = await coletor.automatizarPagina([], opcoes);
+
+    assert.deepEqual(localizarChrome.mock.calls[0].arguments, ['chrome']);
+    const opcoesChrome = launch.mock.calls[0].arguments[0];
+    assert.equal(opcoesChrome.executablePath, caminhoChrome);
+    assert.equal(opcoesChrome.userDataDir, resolve(__dirname, '../perfil/chrome-instalado'));
+    assert.deepEqual(opcoesChrome.ignoreDefaultArgs, ['--password-store=basic', '--use-mock-keychain']);
+    assert.equal(fila.length, 1);
+});
 
 const urlAfiliados = 'https://www.mercadolivre.com.br/afiliados';
 for (const { login, destino, navegacoesEsperadas } of [

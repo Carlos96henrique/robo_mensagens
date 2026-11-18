@@ -446,7 +446,9 @@ Antes de iniciar, preencha no `.env` local as credenciais liberadas no painel da
 
 Na primeira autenticação do canal de mensagens, a aplicação pode solicitar leitura de um QR Code no terminal. Não capture, publique ou armazene esse QR Code em logs.
 
-Em uma máquina nova, ou quando a sessão do Mercado Livre expirar, faça login na aba do Chromium aberta pelo coletor. Se o site terminar em outra página, abra a área de afiliados nessa mesma aba para retomar a coleta. O perfil local em `./perfil` guarda a sessão para os próximos ciclos.
+Em uma máquina nova, ou quando a sessão do Mercado Livre expirar, faça login na aba do Chromium aberta pelo coletor. Se o site terminar em outra página, abra a área de afiliados nessa mesma aba para retomar a coleta. Por padrão, o perfil local em `./perfil` guarda a sessão para os próximos ciclos.
+
+Se o login funcionar no Chrome instalado, você pode autenticar manualmente em um perfil dedicado e usá-lo no coletor. Com o robô parado, adicione `MERCADO_LIVRE_CHROME=instalado` ao `.env` e execute `npm run login:mercado-livre`. Faça login pelo site na janela aberta, encerre essa instância do Chrome e execute `npm start`. Ambos os comandos usam o perfil `./perfil/chrome-instalado`. Quando o Chrome estiver instalado em um local personalizado, use o caminho absoluto do executável como valor de `MERCADO_LIVRE_CHROME`.
 
 O processo abre a porta `3000`, embora ainda não existam endpoints HTTP. A execução deve ser supervisionada, pois o ciclo é contínuo.
 

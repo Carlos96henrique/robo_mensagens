@@ -1,15 +1,7 @@
 const crypto = require('node:crypto');
-const path = require('node:path');
 
 const logger = require('./gerenciador-log');
-
-try {
-    process.loadEnvFile(path.resolve(__dirname, '../.env'));
-} catch (error) {
-    if (error.code !== 'ENOENT') {
-        throw error;
-    }
-}
+require('./configuracao-ambiente');
 
 const API_URL = process.env.SHOPEE_API_URL
     || 'https://open-api.affiliate.shopee.com.br/graphql';

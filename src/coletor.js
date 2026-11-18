@@ -1,8 +1,8 @@
 const puppeteer = require('puppeteer');
 const logger = require('./gerenciador-log');
+const { URL_AFILIADOS, opcoesNavegadorMercadoLivre } = require('./navegador-mercado-livre');
 
 const CLASS_NAME = 'coletor';
-const URL_AFILIADOS = 'https://www.mercadolivre.com.br/afiliados';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const LIMITE_PADRAO = 10;
 const DELAY_CLICK = 1000;
@@ -473,7 +473,7 @@ async function automatizarPagina(listaProdutos, {
 
         browser = await puppeteer.launch({
             headless: false,
-            userDataDir: './perfil',
+            ...opcoesNavegadorMercadoLivre(),
             defaultViewport: null,
             args: [
                 '--window-size=1600,900',
